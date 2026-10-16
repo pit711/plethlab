@@ -31,6 +31,7 @@ LOG_DIR = os.path.join(HERE, "logs")
 
 # Commands that are never sent by this program because they erase device data.
 FORBIDDEN = {0xAE, 0xB6, 0x81}
+SETTLE_S = 3.0      # seconds ignored by the analysis after the finger is inserted
 
 
 def frame(cmd, p1=0, p2=0):
@@ -83,11 +84,19 @@ class Oximeter:
         self.status = {"connected": False, "finger": False, "spo2": None, "pr": None, "signal": 0,
                        "bar": 0, "pi": None, "user": None, "model": None, "port": port,
                        "simulated": simulate}
+        self.finger_since = None
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self.reset()
+
+    def reset(self):
+        """Start a new session: clears trends and analysis, opens new CSV files."""
+        for f in ("csv", "rr_csv"):
+            if hasattr(self, f):
+                getattr(self, f).close()
         self.trend = []                 # [t, spo2, pr, resp, rmssd, amp_rel] per second
         self.an = PulseAnalyzer()
         self.metrics, self.long, self.shape, self.resp_wave = {}, {}, None, []
         self.session = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        os.makedirs(LOG_DIR, exist_ok=True)
         self.csv_path = os.path.join(LOG_DIR, f"session_{self.session}.csv")
         self.csv = open(self.csv_path, "w", newline="", encoding="utf-8")
         self.writer = csv.writer(self.csv)
@@ -201,8 +210,15 @@ class Oximeter:
         spo2 = v[4] if finger and 0 < v[4] <= 100 else None
         pr = v[3] if finger and 0 < v[3] < 255 else None
         pi = (v[6] << 8 | v[5]) if finger and (v[5], v[6]) != (255, 255) and (v[6] << 8 | v[5]) <= 2200 else None
+        now = time.time()
+        # the device adjusts its gain for a few seconds after the finger goes in: skip that phase
+        if not finger:
+            self.finger_since = None
+        elif self.finger_since is None:
+            self.finger_since = now
+        settled = finger and now - self.finger_since >= SETTLE_S
         with self.lock:
-            self.an.feed(v[1] if finger else None, time.time())
+            self.an.feed(v[1] if settled else None, now)
             self.wave.append(v[1] if finger else None)
             self.beat = self.beat or bool(v[0] & 0x40)
             self.status.update(finger=finger, spo2=spo2, pr=pr, signal=v[0] & 0x0F, bar=v[2] & 0x0F, pi=pi)
@@ -369,15 +385,24 @@ class Handler(BaseHTTPRequestHandler):
             self.json(ox.run_op(ox.op_download, user, seg, timeout=330))
         elif url.path == "/api/device/clock":
             self.json(ox.run_op(ox.op_set_clock))
+        elif url.path == "/api/reset":
+            with ox.lock:
+                ox.reset()
+            self.json({"ok": True, "session": ox.session})
         else:
             self.send(404, b"not found", "text/plain")
 
     def do_GET(self):
         ox = self.server.ox
         url = urlparse(self.path)
-        if url.path in ("/", "/index.html"):
-            with open(os.path.join(HERE, "dashboard.html"), "rb") as f:
-                self.send(200, f.read(), "text/html; charset=utf-8")
+        if url.path in ("/", "/index.html", "/plethlab-core.js", "/report.js"):
+            name = url.path.lstrip("/") if url.path.endswith(".js") else "index.html"
+            ctype = "text/javascript; charset=utf-8" if name.endswith(".js") else "text/html; charset=utf-8"
+            with open(os.path.join(HERE, "docs", name), "rb") as f:
+                body = f.read()
+            if name == "index.html":
+                body = body.replace(b'name="plethlab-mode" content="browser"', b'name="plethlab-mode" content="server"')
+            self.send(200, body, ctype)
         elif url.path == "/api/history":
             with ox.lock:
                 rr = ox.an.recent_rr(time.time())

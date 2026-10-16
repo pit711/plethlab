@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PlethLab Monitor</title>
+<meta name="plethlab-mode" content="browser"><!-- server.py rewrites this to "server" -->
 <style>
 /* Bedside-monitor look: dark surface, channel colours follow ICU convention
    (pulse green, SpO2/pleth cyan, respiration yellow). Intentionally dark only. */
@@ -41,6 +42,8 @@ button[aria-pressed="true"] { background: var(--ink); color: #000; border-color:
 
 .inop { padding: 4px 14px; font-weight: 600; letter-spacing: .04em; color: #000; display: none; }
 .inop.show { display: block; background: var(--warn); }
+.hint { padding: 6px 14px; background: #11202b; color: #bae6fd; border-bottom: 1px solid var(--line); }
+#connectBtn { border-color: var(--hr); color: var(--hr); }
 
 main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 1px; background: var(--line); }
 .col { background: var(--bg); display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -139,12 +142,17 @@ dialog::backdrop { background: rgba(0, 0, 0, .65); }
   <span class="spacer"></span>
   <span class="clock num" id="clock">--:--:--</span>
   <span class="spacer"></span>
+  <button id="connectBtn" data-i18n="connect" hidden></button>
+  <button id="demoBtn" data-i18n="demo" hidden></button>
   <button id="deviceBtn" data-i18n="device"></button>
   <button id="tableBtn" aria-pressed="false" data-i18n="table"></button>
+  <button id="resetBtn" data-i18n="reset"></button>
   <button id="csvBtn" data-i18n="csv"></button>
+  <button id="pdfBtn" data-i18n="pdf"></button>
   <button id="langBtn" title="Language / Sprache">DE</button>
 </header>
 <div class="inop" id="inop" role="status"></div>
+<div class="hint" id="hint" hidden></div>
 
 <main>
   <section class="col">
@@ -253,6 +261,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .65); }
   </div>
 </dialog>
 
+<script src="plethlab-core.js"></script>
+<script src="report.js"></script>
 <script>
 // ---------- i18n ----------
 const I18N = {
@@ -283,6 +293,13 @@ const I18N = {
     clockOk: "Device clock set to", clockFail: "The device did not confirm the new time.",
     unknownStart: "unknown (clock not set)", minSpo2: "Min SpO₂", meanPulse: "Mean pulse", desat: "Desaturations ≥3 %",
     odi: "per hour", samples: "samples",
+    connect: "Connect device", disconnect: "Disconnect", demo: "Demo",
+    reset: "Reset", pdf: "PDF", resetConfirm: "Clear all trends and analysis and start a new session?",
+    searching: "searching for pulse …", provisional: "provisional, from beat detection",
+    reportTitle: "Session report", reportCreated: "Created", session: "Session", hrvSection: "HRV · rhythm · pulse shape",
+    inopNotConnected: "NOT CONNECTED – click “Connect device” or try the demo",
+    noSerial: "This browser cannot access USB serial devices. Use Chrome, Edge or Opera on a desktop computer, or run the Python server (see README). The demo works everywhere.",
+    openFailed: "Could not open the serial port. Is another program (e.g. the Python server or the vendor software) using it?",
   },
   de: {
     subtitle: "Pulsoximeter-Monitor", signal: "Signal", device: "Gerät", table: "Tabelle", csv: "CSV",
@@ -311,6 +328,13 @@ const I18N = {
     clockOk: "Geräteuhr gestellt auf", clockFail: "Das Gerät hat die neue Uhrzeit nicht bestätigt.",
     unknownStart: "unbekannt (Uhr nicht gestellt)", minSpo2: "Min. SpO₂", meanPulse: "Ø Puls", desat: "Entsättigungen ≥3 %",
     odi: "pro Stunde", samples: "Werte",
+    connect: "Gerät verbinden", disconnect: "Trennen", demo: "Demo",
+    reset: "Reset", pdf: "PDF", resetConfirm: "Alle Trends und Auswertungen löschen und eine neue Sitzung beginnen?",
+    searching: "Pulssuche …", provisional: "vorläufig, aus Schlagerkennung",
+    reportTitle: "Sitzungsbericht", reportCreated: "Erstellt", session: "Sitzung", hrvSection: "HRV · Rhythmus · Pulsform",
+    inopNotConnected: "NICHT VERBUNDEN – „Gerät verbinden“ klicken oder Demo ausprobieren",
+    noSerial: "Dieser Browser kann nicht auf USB-Seriell-Geräte zugreifen. Bitte Chrome, Edge oder Opera am Desktop nutzen oder den Python-Server starten (siehe README). Die Demo läuft überall.",
+    openFailed: "Der serielle Port ließ sich nicht öffnen. Benutzt ihn ein anderes Programm (z. B. der Python-Server oder die Hersteller-Software)?",
   },
 };
 let lang = "en";
@@ -337,7 +361,38 @@ let trend = [], rrList = [], metrics = {}, hl = {}, ps = null, rw = [], status =
 for (let i = 0; i < 8; i++) { const s = document.createElement("span"); s.style.height = (3 + i * 1.6) + "px"; $("sig").appendChild(s); }
 function tickClock() { const d = new Date(); $("clock").innerHTML = d.toLocaleTimeString(loc()) + `<small>${d.toLocaleDateString(loc())}</small>`; }
 tickClock(); setInterval(tickClock, 500);
-$("csvBtn").onclick = () => { location.href = "/api/csv"; };
+function saveText(name, text) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" })); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function provisionalHr() {
+  const now = Date.now() / 1000, ok = rrList.filter(r => r[2] && r[0] >= now - 10).map(r => r[1]).sort((a, b) => a - b);
+  return ok.length >= 3 ? Math.round(60000 / ok[Math.floor(ok.length / 2)]) : null;
+}
+$("resetBtn").onclick = async () => {
+  if (!confirm(t("resetConfirm"))) return;
+  if (mode === "server") await post("api/reset").catch(() => {});
+  else if (dev) dev.reset();
+  resetView(); updateNumerics();
+};
+$("pdfBtn").onclick = () => {
+  const strips = STRIPS.map(s => s.cv);
+  const pdf = PlethLabReport.buildReport({
+    t, fmt, locale: loc(), trend, metrics, hl, ps, status,
+    canvases: { strips, pleth: $("pleth"), resp: $("respc"), tacho: $("tacho"), poincare: $("poincare"), psd: $("psd"), shape: $("shape") },
+  });
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([pdf], { type: "application/pdf" })); a.download = `plethlab_report_${stamp}.pdf`;
+  document.body.appendChild(a); a.click(); a.remove();
+};
+$("csvBtn").onclick = () => {
+  if (mode === "server") { location.href = "api/csv"; return; }
+  if (!dev) return;
+  saveText(`session_${dev.session}.csv`, dev.csv.join(""));
+  saveText(`rr_${dev.session}.csv`, dev.rrCsv.join(""));
+};
 $("langBtn").onclick = () => { lang = lang === "en" ? "de" : "en"; try { localStorage.setItem("plethlab-lang", lang); } catch (e) {} applyLang(); };
 
 // ---------- canvas helpers ----------
@@ -658,19 +713,23 @@ function updateNumerics() {
   [...$("sig").children].forEach((b, i) => b.classList.toggle("on", i < lvl));
   let inop = "";
   if (serverDown) inop = t("inopServer");
+  else if (mode === "browser" && !dev) inop = t("inopNotConnected");
   else if (!s.connected) inop = t("inopDisconnected");
   else if (!s.finger) inop = t("inopFinger");
   else if ((s.signal || 0) < 2) inop = t("inopWeak");
   $("inop").textContent = inop; $("inop").classList.toggle("show", !!inop);
 
-  $("hr").textContent = s.pr ?? "–";
+  // while the device is still locking on, show a provisional rate from our own beat detection
+  const prov = s.finger && s.pr == null ? provisionalHr() : null;
+  $("hr").textContent = s.pr ?? (prov ? "≈" + prov : "–");
+  $("hr").style.opacity = s.pr == null && prov ? .55 : 1;
   $("spo2").textContent = s.spo2 ?? "–";
   if (s.spo2 == null) { setAlarm($("spo2Alarm")); $("spo2Sub").textContent = s.finger ? t("starting") : ""; }
   else if (s.spo2 < 90) { setAlarm($("spo2Alarm"), "crit", t("spo2Low")); $("spo2Sub").textContent = ""; }
   else if (s.spo2 < 95) { setAlarm($("spo2Alarm"), "warn", t("spo2Reduced")); $("spo2Sub").textContent = ""; }
   else { setAlarm($("spo2Alarm")); $("spo2Sub").textContent = t("normal"); }
   $("pSpo2").classList.toggle("crit-bg", s.spo2 != null && s.spo2 < 90);
-  if (s.pr == null) { setAlarm($("hrAlarm")); $("hrSub").textContent = ""; }
+  if (s.pr == null) { setAlarm($("hrAlarm")); $("hrSub").textContent = s.finger ? t("searching") + (prov ? " · " + t("provisional") : "") : ""; }
   else if (s.pr > 120 || s.pr < 50) { setAlarm($("hrAlarm"), "warn", s.pr > 120 ? t("hrHigh") : t("hrLow")); $("hrSub").textContent = ""; }
   else { setAlarm($("hrAlarm")); $("hrSub").textContent = t("deviceAvg"); }
 
@@ -696,7 +755,7 @@ $("deviceBtn").onclick = () => $("dlg").showModal();
 $("dlgClose").onclick = () => $("dlg").close();
 $("loadStorage").onclick = async () => {
   dlgMsg("info", t("loading")); $("recWrap").hidden = true;
-  const r = await post("/api/device/storage").catch(e => ({ ok: false, error: String(e) }));
+  const r = await api.storage().catch(e => ({ ok: false, error: String(e) }));
   const tb = $("segTable").querySelector("tbody"); tb.innerHTML = "";
   if (!r.ok) { $("segTable").hidden = true; return dlgMsg("err", r.error); }
   if (!r.segments.length) { $("segTable").hidden = true; return dlgMsg("info", t("noSegments")); }
@@ -713,11 +772,12 @@ $("loadStorage").onclick = async () => {
 };
 async function downloadSeg(sg) {
   dlgMsg("info", t("loading"));
-  const r = await post(`/api/device/download?user=${sg.user}&segment=${sg.segment}`).catch(e => ({ ok: false, error: String(e) }));
+  const r = await api.download(sg.user, sg.segment).catch(e => ({ ok: false, error: String(e) }));
   if (!r.ok) return dlgMsg("err", r.error === "storing" ? t("storing") : (r.message || r.error));
   $("dlgMsg").className = "msg";
   showRecording(r.samples, sg.start);
-  $("recCsv").href = "/api/csv?file=" + encodeURIComponent(r.file);
+  if (r.csv) { $("recCsv").href = URL.createObjectURL(new Blob([r.csv], { type: "text/csv" })); $("recCsv").download = r.file; }
+  else { $("recCsv").href = "api/csv?file=" + encodeURIComponent(r.file); $("recCsv").removeAttribute("download"); }
 }
 function showRecording(samples, start) {
   $("recWrap").hidden = false;
@@ -752,19 +812,87 @@ function showRecording(samples, start) {
 }
 $("setClock").onclick = async () => {
   dlgMsg("info", t("loading"));
-  const r = await post("/api/device/clock").catch(e => ({ ok: false, error: String(e) }));
+  const r = await api.clock().catch(e => ({ ok: false, error: String(e) }));
   if (r.ok) dlgMsg("ok", `${t("clockOk")} ${new Date(r.set_to).toLocaleString(loc())}`);
   else dlgMsg("err", r.error || `${t("clockFail")} (${(r.acks || []).join(", ")})`);
 };
 
-// ---------- data stream ----------
-let beatTimer, serverDown = false;
+// ---------- data stream: server mode (server.py) or browser mode (Web Serial / demo) ----------
+let beatTimer, serverDown = false, mode = null, dev = null;
+const api = {
+  storage: () => mode === "server" ? post("api/device/storage") : dev ? dev.storage() : Promise.resolve({ ok: false, error: t("disconnected") }),
+  download: (u, s) => mode === "server" ? post(`api/device/download?user=${u}&segment=${s}`) : dev ? dev.download(u, s) : Promise.resolve({ ok: false, error: t("disconnected") }),
+  clock: () => mode === "server" ? post("api/device/clock") : dev ? dev.setClock() : Promise.resolve({ ok: false, error: t("disconnected") }),
+};
+function resetView() {
+  trend = []; rrList = []; metrics = {}; hl = {}; ps = null; rw = []; wave.fill(null); beatMarks = [];
+  drawStrips(); drawPsd(); drawPoincare(); drawShape();
+}
+async function stopDevice() {
+  if (!dev) return;
+  const d = dev; dev = null;
+  await d.stop().catch(() => {});
+  status = {}; updateNumerics(); updateConnectBtn();
+}
+function updateConnectBtn() {
+  $("connectBtn").textContent = dev && !dev.tr.simulated ? t("disconnect") : t("connect");
+  $("connectBtn").dataset.i18n = dev && !dev.tr.simulated ? "disconnect" : "connect";
+}
+async function startDevice(transport, label) {
+  await stopDevice(); resetView();
+  try { await transport.open(); }
+  catch (e) { $("hint").hidden = false; $("hint").textContent = `${t("openFailed")} (${e.message || e})`; return; }
+  $("hint").hidden = true;
+  dev = new PlethLab.Device(transport, onMsg, label);
+  updateConnectBtn();
+  await dev.start();
+}
+$("connectBtn").onclick = async () => {
+  if (dev && !dev.tr.simulated) { await stopDevice(); return; }
+  if (!("serial" in navigator)) { $("hint").hidden = false; $("hint").textContent = t("noSerial"); return; }
+  let port;
+  try { port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x10C4, usbProductId: 0xEA60 }] }); }
+  catch (e) { return; }   // user cancelled the chooser
+  startDevice(new PlethLab.WebSerialTransport(port), "USB");
+};
+$("demoBtn").onclick = () => startDevice(new PlethLab.SimTransport(), "demo");
+
+async function init() {
+  try {
+    const isServer = document.querySelector('meta[name="plethlab-mode"]').content === "server";
+    const r = isServer ? await fetch("api/history", { cache: "no-store" }) : null;
+    if (r && r.ok) {
+      mode = "server";
+      const h = await r.json();
+      trend = h.trend || []; rrList = h.rr || []; metrics = h.a || {}; hl = h.hl || {}; ps = h.ps || null; rw = h.rw || [];
+      drawStrips(); drawPsd(); drawPoincare(); drawShape();
+      const es = new EventSource("stream");
+      es.onmessage = e => onMsg(JSON.parse(e.data));
+      es.onerror = () => { serverDown = true; updateNumerics(); };
+      return;
+    }
+  } catch (e) { /* no server: browser mode */ }
+  mode = "browser";
+  $("connectBtn").hidden = false; $("demoBtn").hidden = false;
+  updateNumerics();
+  if (!("serial" in navigator)) { $("hint").hidden = false; $("hint").textContent = t("noSerial"); }
+  else {
+    navigator.serial.addEventListener("disconnect", () => { if (dev && !dev.tr.simulated) dev.handleClose(); });
+    const ports = await navigator.serial.getPorts();     // previously granted: reconnect without a prompt
+    if (ports.length === 1 && !new URLSearchParams(location.search).has("demo")) startDevice(new PlethLab.WebSerialTransport(ports[0]), "USB");
+  }
+  if (new URLSearchParams(location.search).has("demo")) startDevice(new PlethLab.SimTransport(), "demo");
+}
 function onMsg(m) {
   serverDown = false;
   for (const v of m.w) { wave[wavePos] = v; wavePos = (wavePos + 1) % WAVE_LEN; }
   if (m.beat) {
-    beatMarks.push((wavePos - 1 + WAVE_LEN) % WAVE_LEN);
-    $("heart").classList.add("beat"); clearTimeout(beatTimer); beatTimer = setTimeout(() => $("heart").classList.remove("beat"), 140);
+    // some devices flag two consecutive samples; merge marks closer than 0.25 s
+    const pos = (wavePos - 1 + WAVE_LEN) % WAVE_LEN, last = beatMarks[beatMarks.length - 1];
+    if (last === undefined || (pos - last + WAVE_LEN) % WAVE_LEN > 15) {
+      beatMarks.push(pos);
+      $("heart").classList.add("beat"); clearTimeout(beatTimer); beatTimer = setTimeout(() => $("heart").classList.remove("beat"), 140);
+    }
   }
   status = m.s;
   if (m.rr && m.rr.length) { rrList.push(...m.rr); const cut = Date.now() / 1000 - 900; rrList = rrList.filter(r => r[0] >= cut); }
@@ -775,15 +903,8 @@ function onMsg(m) {
   updateNumerics();
   if (m.t) { trend.push(m.t); drawStrips(); }
 }
-fetch("/api/history").then(r => r.json()).then(h => {
-  trend = h.trend || []; rrList = h.rr || []; metrics = h.a || {}; hl = h.hl || {}; ps = h.ps || null; rw = h.rw || [];
-  drawStrips(); drawPsd(); drawPoincare(); drawShape();
-}).catch(() => {});
-const es = new EventSource("/stream");
-es.onmessage = e => onMsg(JSON.parse(e.data));
-es.onerror = () => { serverDown = true; updateNumerics(); };
-
 applyLang();
+init();
 (function loop() { drawPleth(); drawResp(); drawTacho(); requestAnimationFrame(loop); })();
 addEventListener("resize", () => { drawStrips(); drawPsd(); drawPoincare(); drawShape(); });
 </script>
