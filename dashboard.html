@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PlethLab Monitor</title>
+<style>
+/* Bedside-monitor look: dark surface, channel colours follow ICU convention
+   (pulse green, SpO2/pleth cyan, respiration yellow). Intentionally dark only. */
+:root {
+  --bg: #000; --panel: #07090a; --line: #1a1f22; --ink: #e9ecee; --ink-2: #9aa3a8; --muted: #5f686d;
+  --grid-minor: rgba(64, 200, 140, .10); --grid-major: rgba(64, 200, 140, .26);
+  --hr: #3ddc84; --spo2: #22d3ee; --resp: #facc15; --hrv: #f472b6; --amp: #e5e7eb;
+  --lf: #60a5fa; --hf: #f472b6;
+  --warn: #fbbf24; --crit: #ef4444;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); }
+body { font: 13px/1.35 "Segoe UI", system-ui, sans-serif; }
+.num { font-variant-numeric: tabular-nums; }
+
+header { display: flex; align-items: center; gap: 14px; padding: 6px 14px; border-bottom: 1px solid var(--line);
+  background: #050607; flex-wrap: wrap; }
+.brand { font-weight: 700; letter-spacing: .02em; }
+.brand small { color: var(--ink-2); font-weight: 400; margin-left: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.spacer { flex: 1; }
+.clock { font-size: 18px; font-weight: 600; }
+.clock small { font-size: 12px; color: var(--ink-2); font-weight: 400; margin-left: 6px; }
+button { font: inherit; color: var(--ink); background: #0d1113; border: 1px solid #2a3236; border-radius: 4px;
+  padding: 3px 10px; cursor: pointer; }
+button:hover { border-color: #46525a; }
+button:disabled { opacity: .5; cursor: default; }
+button[aria-pressed="true"] { background: var(--ink); color: #000; border-color: var(--ink); }
+.sig { display: inline-flex; gap: 2px; align-items: flex-end; height: 14px; }
+.sig span { width: 4px; background: #262c30; border-radius: 1px; }
+.sig span.on { background: var(--spo2); }
+.sim { background: #3b2f00; color: var(--warn); border-radius: 3px; padding: 0 6px; font-weight: 600; font-size: 11px; }
+
+.inop { padding: 4px 14px; font-weight: 600; letter-spacing: .04em; color: #000; display: none; }
+.inop.show { display: block; background: var(--warn); }
+
+main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 1px; background: var(--line); }
+.col { background: var(--bg); display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.right { background: var(--panel); }
+.right .panel + .panel { border-top: 1px solid var(--line); }
+
+.ch { position: relative; background: var(--bg); padding: 4px 8px 6px; }
+.ch-head { display: flex; gap: 12px; align-items: baseline; font-size: 12px; margin-bottom: 2px; flex-wrap: wrap; }
+.ch-head b { font-weight: 600; }
+.ch-head .meta { color: var(--muted); }
+canvas { display: block; width: 100%; }
+#pleth { height: 190px; }
+#respc { height: 90px; }
+#tacho { height: 130px; }
+
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); }
+.card { background: var(--bg); padding: 6px 8px 8px; min-width: 0; }
+.card canvas { height: 200px; }
+.kv { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px 8px; margin-top: 6px; }
+.kv div { color: var(--ink-2); font-size: 11px; }
+.kv b { display: block; color: var(--ink); font-size: 14px; font-weight: 600; }
+.note { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+.panel { background: var(--panel); padding: 8px 12px 10px; position: relative; }
+.p-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; }
+.p-head b { font-weight: 600; letter-spacing: .03em; }
+.p-head .unit { color: var(--ink-2); }
+.limits { position: absolute; right: 12px; top: 26px; text-align: right; font-size: 11px; line-height: 1.25; color: var(--ink-2); }
+.big { font-weight: 600; line-height: 1; margin-top: 4px; }
+.big.xl { font-size: 76px; }
+.big.l { font-size: 52px; }
+.big.m { font-size: 40px; }
+.sub { color: var(--ink-2); font-size: 12px; margin-top: 4px; min-height: 16px; }
+.rows { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px 10px; margin-top: 6px; }
+.rows div { color: var(--ink-2); font-size: 11px; }
+.rows b { display: block; color: var(--ink); font-size: 16px; font-weight: 600; }
+.heart { display: inline-block; font-size: 26px; vertical-align: top; margin-left: 6px; transition: transform .08s, opacity .2s; opacity: .45; }
+.heart.beat { transform: scale(1.35); opacity: 1; }
+.alarm { font-weight: 700; font-size: 12px; letter-spacing: .05em; padding: 1px 6px; border-radius: 3px; display: none; }
+.alarm.warn { display: inline-block; background: var(--warn); color: #000; }
+.alarm.crit { display: inline-block; background: var(--crit); color: #fff; animation: blink 1s steps(2, start) infinite; }
+@keyframes blink { to { visibility: hidden; } }
+.panel.crit-bg { box-shadow: inset 0 0 0 2px var(--crit); }
+
+.trend-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 6px 8px; background: var(--bg); }
+.trend-head b { font-size: 12px; margin-right: 8px; }
+.strip { position: relative; background: var(--bg); padding: 2px 8px; }
+.strip canvas { height: 86px; }
+.strip .lbl { position: absolute; right: 18px; top: 3px; font-size: 11px; pointer-events: none; background: rgba(0, 0, 0, .7); padding: 0 4px; }
+.tip { position: fixed; pointer-events: none; background: #0d1113; border: 1px solid #3a444a; border-radius: 4px;
+  padding: 6px 9px; font-size: 12px; display: none; z-index: 20; white-space: nowrap; }
+.tip .row { display: flex; gap: 8px; justify-content: space-between; }
+.tip i { display: inline-block; width: 10px; height: 3px; vertical-align: middle; margin-right: 5px; }
+
+#tableWrap { display: none; max-height: 300px; overflow: auto; background: var(--bg); padding: 0 8px 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--line); }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--ink-2); font-weight: 500; position: sticky; top: 0; background: var(--bg); }
+footer { color: var(--muted); font-size: 11px; padding: 8px 14px; border-top: 1px solid var(--line); }
+
+dialog { background: #0b0e10; color: var(--ink); border: 1px solid #2a3236; border-radius: 8px; padding: 0;
+  width: min(760px, calc(100vw - 32px)); }
+dialog::backdrop { background: rgba(0, 0, 0, .65); }
+.dlg-head { display: flex; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.dlg-head b { font-size: 14px; }
+.dlg-body { padding: 12px 14px; }
+.dlg-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.msg { padding: 6px 10px; border-radius: 4px; margin: 8px 0; display: none; }
+.msg.show { display: block; }
+.msg.err { background: #3a1010; color: #fecaca; }
+.msg.ok { background: #0f2a18; color: #bbf7d0; }
+.msg.info { background: #11202b; color: #bae6fd; }
+#recChart { height: 180px; margin-top: 8px; }
+
+@media (max-width: 1100px) { .cards { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 1000px) {
+  main { grid-template-columns: 1fr; }
+  .right { display: grid; grid-template-columns: 1fr 1fr; }
+  .right .panel + .panel { border-top: 0; }
+  .big.xl { font-size: 56px; } .big.l { font-size: 40px; }
+}
+@media (max-width: 600px) {
+  .right, .cards { grid-template-columns: 1fr; }
+  #pleth { height: 150px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">PlethLab <small data-i18n="subtitle"></small></span>
+  <span class="sim" id="simChip" hidden>SIM</span>
+  <span class="chip" id="userChip"></span>
+  <span class="chip"><span class="dot" id="connDot"></span><span id="connText"></span></span>
+  <span class="chip"><span data-i18n="signal"></span> <span class="sig" id="sig"></span></span>
+  <span class="spacer"></span>
+  <span class="clock num" id="clock">--:--:--</span>
+  <span class="spacer"></span>
+  <button id="deviceBtn" data-i18n="device"></button>
+  <button id="tableBtn" aria-pressed="false" data-i18n="table"></button>
+  <button id="csvBtn" data-i18n="csv"></button>
+  <button id="langBtn" title="Language / Sprache">DE</button>
+</header>
+<div class="inop" id="inop" role="status"></div>
+
+<main>
+  <section class="col">
+    <div class="ch">
+      <div class="ch-head"><b style="color:var(--spo2)">Pleth</b><span class="meta" data-i18n="plethMeta"></span></div>
+      <canvas id="pleth"></canvas>
+    </div>
+    <div class="ch">
+      <div class="ch-head"><b style="color:var(--resp)" data-i18n="respWave"></b><span class="meta" data-i18n="respWaveMeta"></span></div>
+      <canvas id="respc"></canvas>
+    </div>
+    <div class="ch">
+      <div class="ch-head"><b style="color:var(--hr)" data-i18n="tacho"></b><span class="meta" data-i18n="tachoMeta"></span></div>
+      <canvas id="tacho"></canvas>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <div class="ch-head"><b style="color:var(--hrv)">Poincaré</b><span class="meta" data-i18n="poincareMeta"></span></div>
+        <canvas id="poincare"></canvas>
+        <div class="kv num"><div>SD1<b id="sd1">–</b></div><div>SD2<b id="sd2">–</b></div><div>SD2/SD1<b id="sdr">–</b></div></div>
+      </div>
+      <div class="card">
+        <div class="ch-head"><b style="color:var(--hrv)" data-i18n="spectrum"></b><span class="meta" data-i18n="spectrumMeta"></span></div>
+        <canvas id="psd"></canvas>
+        <div class="kv num"><div>LF<b id="lf">–</b></div><div>HF<b id="hf">–</b></div><div>LF/HF<b id="lfhf">–</b></div></div>
+        <div class="note" id="psdNote"></div>
+      </div>
+      <div class="card">
+        <div class="ch-head"><b style="color:var(--spo2)" data-i18n="shape"></b><span class="meta" id="shapeMeta"></span></div>
+        <canvas id="shape"></canvas>
+        <div class="kv num"><div data-i18n-prefix="rise">–<b id="rise">–</b></div><div>b/a<b id="ba">–</b></div><div data-i18n-prefix="notch">–<b id="notch">–</b></div></div>
+        <div class="note" data-i18n="shapeNote"></div>
+      </div>
+    </div>
+    <div class="trend-head" role="group">
+      <b data-i18n="trends"></b>
+      <button data-range="300">5 min</button>
+      <button data-range="1800" aria-pressed="true">30 min</button>
+      <button data-range="7200">2 h</button>
+      <button data-range="0" data-i18n="all"></button>
+    </div>
+    <div id="strips"></div>
+    <div id="tableWrap">
+      <table><thead><tr><th data-i18n="time"></th><th>SpO₂ %</th><th data-i18n="pulse"></th><th data-i18n="respPerMin"></th><th>RMSSD ms</th><th data-i18n="ampPct"></th></tr></thead>
+      <tbody id="tbody"></tbody></table>
+    </div>
+  </section>
+
+  <aside class="col right">
+    <div class="panel" id="pHr">
+      <div class="p-head"><b style="color:var(--hr)" data-i18n="pulseCaps"></b><span class="unit">bpm</span></div>
+      <div class="limits num">120<br>50</div>
+      <div class="big xl num" style="color:var(--hr)"><span id="hr">–</span><span class="heart" id="heart" style="color:var(--hr)">♥</span></div>
+      <div class="sub"><span class="alarm" id="hrAlarm"></span> <span id="hrSub"></span></div>
+    </div>
+    <div class="panel" id="pSpo2">
+      <div class="p-head"><b style="color:var(--spo2)">SpO₂</b><span class="unit">%</span></div>
+      <div class="limits num">100<br>90</div>
+      <div class="big xl num" style="color:var(--spo2)" id="spo2">–</div>
+      <div class="sub"><span class="alarm" id="spo2Alarm"></span> <span id="spo2Sub"></span></div>
+    </div>
+    <div class="panel">
+      <div class="p-head"><b style="color:var(--resp)" data-i18n="respCaps"></b><span class="unit">/min</span></div>
+      <div class="big l num" style="color:var(--resp)" id="resp">–</div>
+      <div class="sub" id="respSub"></div>
+    </div>
+    <div class="panel">
+      <div class="p-head"><b style="color:var(--hrv)">HRV · RMSSD</b><span class="unit">ms</span></div>
+      <div class="big m num" style="color:var(--hrv)" id="rmssd">–</div>
+      <div class="rows num">
+        <div>SDNN<b id="sdnn">–</b></div>
+        <div>pNN50<b id="pnn50">–</b></div>
+        <div data-i18n-prefix="meanHr">–<b id="hrMean">–</b></div>
+      </div>
+      <div class="sub" id="hrvSub"></div>
+    </div>
+    <div class="panel">
+      <div class="p-head"><b style="color:var(--amp)" data-i18n="perfCaps"></b><span class="unit" data-i18n="relative"></span></div>
+      <div class="rows num">
+        <div data-i18n-prefix="amplitude">–<b id="amp">–</b></div>
+        <div>PI<b id="pi">–</b></div>
+        <div data-i18n-prefix="rhythm">–<b id="rhythm">–</b></div>
+      </div>
+      <div class="sub" data-i18n="ampSub"></div>
+    </div>
+  </aside>
+</main>
+
+<footer data-i18n="footer"></footer>
+<div class="tip" id="tip"></div>
+
+<dialog id="dlg">
+  <div class="dlg-head"><b data-i18n="deviceTitle"></b><span class="spacer"></span><button id="dlgClose" data-i18n="close"></button></div>
+  <div class="dlg-body">
+    <div class="dlg-row">
+      <button id="loadStorage" data-i18n="readStorage"></button>
+      <button id="setClock" data-i18n="setClock"></button>
+    </div>
+    <div class="msg" id="dlgMsg"></div>
+    <table id="segTable" hidden><thead><tr><th data-i18n="segment"></th><th data-i18n="start"></th><th data-i18n="duration"></th><th></th></tr></thead><tbody></tbody></table>
+    <div id="recWrap" hidden>
+      <canvas id="recChart"></canvas>
+      <div class="kv num" id="recStats"></div>
+      <div class="dlg-row" style="margin-top:8px"><a id="recCsv" href="#" style="color:var(--spo2)" data-i18n="downloadCsv"></a></div>
+    </div>
+  </div>
+</dialog>
+
+<script>
+// ---------- i18n ----------
+const I18N = {
+  en: {
+    subtitle: "pulse oximeter monitor", signal: "Signal", device: "Device", table: "Table", csv: "CSV",
+    plethMeta: "pulse wave · 60 samples/s, drawn as a smooth curve · 6 s",
+    respWave: "Resp (derived)", respWaveMeta: "respiration modulation of the pulse wave · 30 s",
+    tacho: "RR tachogram", tachoMeta: "beat-to-beat interval in ms · last 2 min · ○ = irregular/artefact",
+    poincareMeta: "RR(n) vs RR(n+1) · 5 min", spectrum: "HRV spectrum", spectrumMeta: "LF 0.04–0.15 Hz · HF 0.15–0.4 Hz · 5 min",
+    shape: "Pulse shape", shapeNote: "Ensemble average of the last 20 s (top) and its 2nd derivative with a–e waves (bottom). The device pre-filters the wave; use for comparison, not diagnosis.",
+    rise: "Rise", notch: "Peak→notch", trends: "Trends", all: "All", time: "Time", pulse: "Pulse", respPerMin: "Resp /min",
+    ampPct: "Amplitude %", pulseCaps: "PULSE", respCaps: "RESP", respShort: "Resp", perfCaps: "PERFUSION", relative: "relative",
+    meanHr: "Mean HR", amplitude: "Amplitude", rhythm: "Rhythm",
+    ampSub: "Amplitude relative to the session median",
+    footer: "PlethLab shows data from CMS50D+-compatible pulse oximeters (e.g. PULOX PO-250). Respiration, HRV, rhythm and pulse shape are computed from the pulse wave. Not a medical device, no diagnosis. Limits are rough guide values.",
+    connected: "connected", disconnected: "device not connected", user: "User",
+    inopDisconnected: "DEVICE DISCONNECTED", inopFinger: "NO FINGER / SENSOR OFF", inopWeak: "WEAK SIGNAL", inopServer: "SERVER UNREACHABLE",
+    spo2Low: "▲ SpO₂ LOW", spo2Reduced: "! SpO₂ reduced", normal: "normal", starting: "starting …",
+    hrHigh: "! PULSE HIGH", hrLow: "! PULSE LOW", deviceAvg: "device value (averaged)",
+    respEst: "estimated from the pulse wave", quality: "quality", good: "good", medium: "medium", uncertain: "uncertain",
+    collecting: "collecting data (keep still ≥ 30 s)", last60: "last 60 s", beats: "beats",
+    regular: "regular", irregular: "irregular", na: "n/a",
+    needData: "needs ≥ 2 min of calm recording", psdSpan: "based on",
+    deviceTitle: "Device", close: "Close", readStorage: "Read device storage", setClock: "Set device clock to PC time",
+    segment: "Recording", start: "Start", duration: "Duration", download: "Download", downloadCsv: "Download as CSV",
+    loading: "Talking to the device …", noSegments: "No recordings stored on the device.",
+    storing: "The device is still recording. Stop the recording on the device, then try again.",
+    clockOk: "Device clock set to", clockFail: "The device did not confirm the new time.",
+    unknownStart: "unknown (clock not set)", minSpo2: "Min SpO₂", meanPulse: "Mean pulse", desat: "Desaturations ≥3 %",
+    odi: "per hour", samples: "samples",
+  },
+  de: {
+    subtitle: "Pulsoximeter-Monitor", signal: "Signal", device: "Gerät", table: "Tabelle", csv: "CSV",
+    plethMeta: "Pulswelle · 60 Werte/s, als glatte Kurve gezeichnet · 6 s",
+    respWave: "Atmung (abgeleitet)", respWaveMeta: "Atemmodulation der Pulswelle · 30 s",
+    tacho: "RR-Tachogramm", tachoMeta: "Abstand der Pulsschläge in ms · letzte 2 min · ○ = auffällig/Artefakt",
+    poincareMeta: "RR(n) gegen RR(n+1) · 5 min", spectrum: "HRV-Spektrum", spectrumMeta: "LF 0,04–0,15 Hz · HF 0,15–0,4 Hz · 5 min",
+    shape: "Pulsform", shapeNote: "Mittelwert der letzten 20 s (oben) und 2. Ableitung mit a–e-Wellen (unten). Das Gerät filtert die Welle vor; zum Vergleichen, nicht zur Diagnose.",
+    rise: "Anstieg", notch: "Gipfel→Delle", trends: "Trends", all: "Alles", time: "Zeit", pulse: "Puls", respPerMin: "Atem/min",
+    ampPct: "Amplitude %", pulseCaps: "PULS", respCaps: "ATMUNG", respShort: "Atmung", perfCaps: "PERFUSION", relative: "relativ",
+    meanHr: "Ø Puls", amplitude: "Amplitude", rhythm: "Rhythmus",
+    ampSub: "Amplitude relativ zum Sitzungsmittel",
+    footer: "PlethLab zeigt Daten von CMS50D+-kompatiblen Pulsoximetern (z. B. PULOX PO-250). Atmung, HRV, Rhythmus und Pulsform werden aus der Pulswelle berechnet. Kein Medizinprodukt, keine Diagnose. Grenzwerte sind grobe Richtwerte.",
+    connected: "verbunden", disconnected: "Gerät nicht verbunden", user: "Benutzer",
+    inopDisconnected: "GERÄT GETRENNT", inopFinger: "KEIN FINGER / SENSOR AB", inopWeak: "SCHWACHES SIGNAL", inopServer: "SERVER NICHT ERREICHBAR",
+    spo2Low: "▲ SpO₂ NIEDRIG", spo2Reduced: "! SpO₂ erniedrigt", normal: "normal", starting: "Messung läuft an …",
+    hrHigh: "! PULS HOCH", hrLow: "! PULS NIEDRIG", deviceAvg: "Gerätewert (gemittelt)",
+    respEst: "aus Pulswelle geschätzt", quality: "Qualität", good: "gut", medium: "mittel", uncertain: "unsicher",
+    collecting: "sammle Daten (≥ 30 s ruhig halten)", last60: "letzte 60 s", beats: "Schläge",
+    regular: "regelmäßig", irregular: "auffällig", na: "n. v.",
+    needData: "braucht ≥ 2 min ruhige Messung", psdSpan: "Basis",
+    deviceTitle: "Gerät", close: "Schließen", readStorage: "Gerätespeicher lesen", setClock: "Geräteuhr auf PC-Zeit stellen",
+    segment: "Aufzeichnung", start: "Start", duration: "Dauer", download: "Herunterladen", downloadCsv: "Als CSV herunterladen",
+    loading: "Kommuniziere mit dem Gerät …", noSegments: "Keine Aufzeichnungen im Gerät gespeichert.",
+    storing: "Das Gerät zeichnet noch auf. Aufnahme am Gerät beenden und erneut versuchen.",
+    clockOk: "Geräteuhr gestellt auf", clockFail: "Das Gerät hat die neue Uhrzeit nicht bestätigt.",
+    unknownStart: "unbekannt (Uhr nicht gestellt)", minSpo2: "Min. SpO₂", meanPulse: "Ø Puls", desat: "Entsättigungen ≥3 %",
+    odi: "pro Stunde", samples: "Werte",
+  },
+};
+let lang = "en";
+try { lang = localStorage.getItem("plethlab-lang") || (navigator.language || "en").slice(0, 2); } catch (e) {}
+if (!I18N[lang]) lang = "en";
+const t = k => I18N[lang][k] ?? I18N.en[k] ?? k;
+function applyLang() {
+  document.documentElement.lang = lang;
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-prefix]").forEach(el => { el.firstChild.textContent = t(el.dataset.i18nPrefix); });
+  $("langBtn").textContent = lang === "en" ? "DE" : "EN";
+  updateNumerics(); drawStrips();
+}
+
+const $ = id => document.getElementById(id);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const loc = () => lang === "de" ? "de-DE" : "en-GB";
+const fmtT = ts => new Date(ts * 1000).toLocaleTimeString(loc());
+const fmt = (v, d = 0) => v == null ? "–" : (+v).toLocaleString(loc(), { minimumFractionDigits: d, maximumFractionDigits: d });
+
+let trend = [], rrList = [], metrics = {}, hl = {}, ps = null, rw = [], status = {}, range = 1800;
+
+// ---------- header ----------
+for (let i = 0; i < 8; i++) { const s = document.createElement("span"); s.style.height = (3 + i * 1.6) + "px"; $("sig").appendChild(s); }
+function tickClock() { const d = new Date(); $("clock").innerHTML = d.toLocaleTimeString(loc()) + `<small>${d.toLocaleDateString(loc())}</small>`; }
+tickClock(); setInterval(tickClock, 500);
+$("csvBtn").onclick = () => { location.href = "/api/csv"; };
+$("langBtn").onclick = () => { lang = lang === "en" ? "de" : "en"; try { localStorage.setItem("plethlab-lang", lang); } catch (e) {} applyLang(); };
+
+// ---------- canvas helpers ----------
+function prep(cv) {
+  const dpr = window.devicePixelRatio || 1, r = cv.getBoundingClientRect();
+  const w = Math.round(r.width * dpr), h = Math.round(r.height * dpr);
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, r.width, r.height);
+  ctx.font = "11px Segoe UI, sans-serif";
+  return [ctx, r.width, r.height];
+}
+function paperGrid(ctx, W, H, pxPerSec) {
+  const minor = pxPerSec / 5;           // ECG paper: small box 0.2 s, large box 1 s
+  ctx.lineWidth = 1;
+  for (let x = 0, i = 0; x <= W; x += minor, i++) {
+    ctx.strokeStyle = i % 5 === 0 ? css("--grid-major") : css("--grid-minor");
+    ctx.beginPath(); ctx.moveTo(Math.round(x) + .5, 0); ctx.lineTo(Math.round(x) + .5, H); ctx.stroke();
+  }
+  for (let y = H, i = 0; y >= 0; y -= minor, i++) {
+    ctx.strokeStyle = i % 5 === 0 ? css("--grid-major") : css("--grid-minor");
+    ctx.beginPath(); ctx.moveTo(0, Math.round(y) + .5); ctx.lineTo(W, Math.round(y) + .5); ctx.stroke();
+  }
+}
+function smoothPath(ctx, pts) {
+  // quadratic curves through midpoints: smooth rendering without inventing samples
+  if (pts.length < 2) return;
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length - 1; i++) {
+    ctx.quadraticCurveTo(pts[i][0], pts[i][1], (pts[i][0] + pts[i + 1][0]) / 2, (pts[i][1] + pts[i + 1][1]) / 2);
+  }
+  const l = pts[pts.length - 1]; ctx.lineTo(l[0], l[1]);
+}
+function hgrid(ctx, L, R, W, y, lo, hi, step, fmtLbl) {
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) {
+    ctx.strokeStyle = css("--grid-minor"); ctx.beginPath(); ctx.moveTo(L, Math.round(y(v)) + .5); ctx.lineTo(W - R, Math.round(y(v)) + .5); ctx.stroke();
+    ctx.fillStyle = css("--muted"); ctx.fillText(fmtLbl ? fmtLbl(v) : v, L - 6, y(v));
+  }
+}
+
+// ---------- pleth sweep ----------
+const WAVE_SEC = 6, WAVE_LEN = WAVE_SEC * 60;
+const wave = new Array(WAVE_LEN).fill(null);
+let wavePos = 0, beatMarks = [], scaleLo = 20, scaleHi = 80;
+function drawPleth() {
+  const [ctx, W, H] = prep($("pleth"));
+  paperGrid(ctx, W, H, W / WAVE_SEC);
+  const vals = wave.filter(v => v != null);
+  if (vals.length > 30) {
+    const lo = Math.min(...vals), hi = Math.max(...vals), pad = Math.max(4, (hi - lo) * .12);
+    scaleLo += ((lo - pad) - scaleLo) * .05; scaleHi += ((hi + pad) - scaleHi) * .05;
+  }
+  const xs = i => i / (WAVE_LEN - 1) * W, ys = v => H - 8 - (v - scaleLo) / Math.max(1, scaleHi - scaleLo) * (H - 16);
+  const gap = 15;
+  ctx.strokeStyle = css("--spo2"); ctx.lineWidth = 2; ctx.lineJoin = ctx.lineCap = "round";
+  let seg = [];
+  const flush = () => { if (seg.length > 1) { ctx.beginPath(); smoothPath(ctx, seg); ctx.stroke(); } seg = []; };
+  for (let i = 0; i < WAVE_LEN; i++) {
+    const d = (i - wavePos + WAVE_LEN) % WAVE_LEN;
+    if (d < gap || wave[i] == null) { flush(); continue; }
+    seg.push([xs(i), ys(wave[i])]);
+  }
+  flush();
+  ctx.fillStyle = css("--hr");
+  beatMarks = beatMarks.filter(p => (p - wavePos + WAVE_LEN) % WAVE_LEN >= gap);
+  for (const p of beatMarks) { const x = xs(p); ctx.beginPath(); ctx.moveTo(x - 4, 2); ctx.lineTo(x + 4, 2); ctx.lineTo(x, 9); ctx.fill(); }
+  ctx.fillStyle = css("--muted"); ctx.textAlign = "right"; ctx.fillText("1 s", W - 6, H - 6);
+}
+
+// ---------- derived respiration ----------
+function drawResp() {
+  const [ctx, W, H] = prep($("respc"));
+  paperGrid(ctx, W, H, W / 30);
+  if (rw.length < 2) return;
+  const tEnd = rw[rw.length - 1][0], x = ts => (ts - (tEnd - 30)) / 30 * W, y = v => H / 2 - v * (H / 2 - 8);
+  ctx.strokeStyle = css("--resp"); ctx.lineWidth = 2; ctx.lineJoin = "round";
+  ctx.beginPath(); smoothPath(ctx, rw.map(p => [x(p[0]), y(p[1])])); ctx.stroke();
+  ctx.fillStyle = css("--muted"); ctx.textAlign = "right"; ctx.fillText("5 s", W - 6, H - 6);
+}
+
+// ---------- tachogram ----------
+let tachoHover = null;
+function drawTacho() {
+  const [ctx, W, H] = prep($("tacho"));
+  const L = 44, R = 8, T = 8, B = 18, now = Date.now() / 1000, span = 120;
+  const data = rrList.filter(r => r[0] >= now - span);
+  const ok = data.filter(r => r[2]).map(r => r[1]);
+  let lo = 600, hi = 1200;
+  if (ok.length) { lo = Math.floor((Math.min(...ok) - 60) / 100) * 100; hi = Math.ceil((Math.max(...ok) + 60) / 100) * 100; }
+  const x = ts => L + (ts - (now - span)) / span * (W - L - R), y = v => T + (hi - v) / (hi - lo) * (H - T - B);
+  hgrid(ctx, L, R, W, y, lo, hi, hi - lo > 800 ? 200 : 100);
+  ctx.textBaseline = "top";
+  for (let s = 0; s <= span; s += 30) {
+    ctx.textAlign = s === 0 ? "left" : s === span ? "right" : "center";
+    ctx.fillText(s === span ? "0" : `-${span - s} s`, x(now - span + s), H - B + 4);
+  }
+  ctx.strokeStyle = css("--hr"); ctx.lineWidth = 1.5; ctx.globalAlpha = .55; ctx.beginPath();
+  let pen = false;
+  for (const r of data) { if (!r[2]) { pen = false; continue; } if (!pen) { ctx.moveTo(x(r[0]), y(r[1])); pen = true; } else ctx.lineTo(x(r[0]), y(r[1])); }
+  ctx.stroke(); ctx.globalAlpha = 1;
+  for (const r of data) {
+    ctx.beginPath(); ctx.arc(x(r[0]), y(Math.min(hi, Math.max(lo, r[1]))), r[2] ? 2.5 : 4, 0, 7);
+    if (r[2]) { ctx.fillStyle = css("--hr"); ctx.fill(); } else { ctx.strokeStyle = css("--warn"); ctx.lineWidth = 1.5; ctx.stroke(); }
+  }
+  if (tachoHover && data.length) {
+    let best = data[0]; for (const r of data) if (Math.abs(x(r[0]) - tachoHover.x) < Math.abs(x(best[0]) - tachoHover.x)) best = r;
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x(best[0]), y(best[1]), 6, 0, 7); ctx.stroke();
+    showTip(tachoHover.cx, tachoHover.cy, `<div style="color:var(--ink-2)">${fmtT(best[0])}</div>
+      <div class="row"><span><i style="background:var(--hr)"></i>RR</span><b>${fmt(best[1])} ms</b></div>
+      <div class="row"><span>≙</span><b>${fmt(60000 / best[1])} bpm</b></div>
+      ${best[2] ? "" : `<div style="color:var(--warn)">${t("irregular")}</div>`}`);
+  }
+}
+$("tacho").addEventListener("mousemove", e => { const r = $("tacho").getBoundingClientRect(); tachoHover = { x: e.clientX - r.left, cx: e.clientX, cy: e.clientY }; });
+$("tacho").addEventListener("mouseleave", () => { tachoHover = null; hideTip(); });
+
+// ---------- Poincaré ----------
+function drawPoincare() {
+  const [ctx, W, H] = prep($("poincare"));
+  const now = Date.now() / 1000, pts = [];
+  for (let i = 1; i < rrList.length; i++) {
+    const a = rrList[i - 1], b = rrList[i];
+    if (b[0] >= now - 300 && a[2] && b[2]) pts.push([a[1], b[1]]);
+  }
+  const S = Math.min(W - 40, H - 22), L = (W - S) / 2 + 14, T = 4;
+  let lo = 600, hi = 1200;
+  if (pts.length) { const all = pts.flat(); lo = Math.floor((Math.min(...all) - 50) / 100) * 100; hi = Math.ceil((Math.max(...all) + 50) / 100) * 100; }
+  const x = v => L + (v - lo) / (hi - lo) * S, y = v => T + S - (v - lo) / (hi - lo) * S;
+  ctx.strokeStyle = css("--grid-minor"); ctx.strokeRect(L + .5, T + .5, S, S);
+  ctx.fillStyle = css("--muted"); ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  ctx.fillText(lo, L - 4, y(lo)); ctx.fillText(hi, L - 4, y(hi));
+  ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText("RR(n) ms", L + S / 2, T + S + 4);
+  ctx.setLineDash([3, 4]); ctx.strokeStyle = css("--grid-major");
+  ctx.beginPath(); ctx.moveTo(x(lo), y(lo)); ctx.lineTo(x(hi), y(hi)); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = css("--hrv"); ctx.globalAlpha = .7;
+  for (const [a, b] of pts) { ctx.beginPath(); ctx.arc(x(a), y(b), 2.5, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  if (hl.sd1 && hl.sd2 && pts.length) {
+    const m = pts.reduce((s, p) => s + p[0] + p[1], 0) / (2 * pts.length), k = S / (hi - lo);
+    ctx.save(); ctx.translate(x(m), y(m)); ctx.rotate(-Math.PI / 4);
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.ellipse(0, 0, 2 * hl.sd2 * k, 2 * hl.sd1 * k, 0, 0, 7); ctx.stroke();
+    ctx.restore();
+  }
+  $("sd1").textContent = hl.sd1 == null ? "–" : fmt(hl.sd1, 1) + " ms";
+  $("sd2").textContent = hl.sd2 == null ? "–" : fmt(hl.sd2, 1) + " ms";
+  $("sdr").textContent = hl.sd1 && hl.sd2 ? fmt(hl.sd2 / hl.sd1, 2) : "–";
+}
+
+// ---------- HRV spectrum ----------
+function drawPsd() {
+  const [ctx, W, H] = prep($("psd"));
+  const L = 44, R = 8, T = 8, B = 18;
+  const sp = hl.spectrum || [];
+  const maxP = sp.length ? Math.max(...sp.map(p => p[1])) * 1.1 || 1 : 1;
+  const x = f => L + f / 0.5 * (W - L - R), y = p => T + (1 - p / maxP) * (H - T - B);
+  ctx.globalAlpha = .12;
+  ctx.fillStyle = css("--lf"); ctx.fillRect(x(0.04), T, x(0.15) - x(0.04), H - T - B);
+  ctx.fillStyle = css("--hf"); ctx.fillRect(x(0.15), T, x(0.40) - x(0.15), H - T - B);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = css("--muted"); ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (const f of [0, 0.1, 0.2, 0.3, 0.4]) ctx.fillText(fmt(f, 1), x(f), H - B + 4);
+  ctx.textAlign = "right"; ctx.fillText("0,5 Hz".replace("0,5", fmt(0.5, 1)), W - R, H - B + 4);
+  ctx.textBaseline = "top"; ctx.fillStyle = css("--lf"); ctx.fillText("LF", x(0.08), T + 2);
+  ctx.fillStyle = css("--hf"); ctx.fillText("HF", x(0.26), T + 2);
+  ctx.strokeStyle = css("--axis") || "#383835"; ctx.beginPath(); ctx.moveTo(L, H - B + .5); ctx.lineTo(W - R, H - B + .5); ctx.stroke();
+  if (sp.length > 1) {
+    ctx.strokeStyle = "#e5e7eb"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.beginPath();
+    sp.forEach((p, i) => i ? ctx.lineTo(x(p[0]), y(p[1])) : ctx.moveTo(x(p[0]), y(p[1]))); ctx.stroke();
+  }
+  $("lf").textContent = hl.lf == null ? "–" : fmt(hl.lf) + " ms²";
+  $("hf").textContent = hl.hf == null ? "–" : fmt(hl.hf) + " ms²";
+  $("lfhf").textContent = fmt(hl.lf_hf, 2);
+  $("psdNote").textContent = hl.lf == null ? t("needData") + (hl.span ? ` (${hl.span} s)` : "") : `${t("psdSpan")}: ${hl.span} s`;
+}
+
+// ---------- pulse shape ----------
+function drawShape() {
+  const [ctx, W, H] = prep($("shape"));
+  const L = 8, R = 8, mid = H * 0.58;
+  if (!ps) { ctx.fillStyle = css("--muted"); ctx.textAlign = "center"; ctx.fillText(t("collecting"), W / 2, H / 2); return; }
+  $("shapeMeta").textContent = `n = ${ps.n} · 20 s`;
+  const t0 = ps.t[0], t1 = ps.t[ps.t.length - 1], x = s => L + (s - t0) / (t1 - t0) * (W - L - R);
+  const yw = v => 6 + (1 - v) * (mid - 12), yd = v => mid + (H - mid) / 2 - v * ((H - mid) / 2 - 4);
+  ctx.strokeStyle = css("--grid-minor"); ctx.beginPath(); ctx.moveTo(L, mid + .5); ctx.lineTo(W - R, mid + .5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(L, Math.round(yd(0)) + .5); ctx.lineTo(W - R, Math.round(yd(0)) + .5); ctx.stroke();
+  ctx.lineWidth = 2; ctx.lineJoin = "round";
+  ctx.strokeStyle = css("--spo2"); ctx.beginPath(); ps.t.forEach((s, i) => i ? ctx.lineTo(x(s), yw(ps.wave[i])) : ctx.moveTo(x(s), yw(ps.wave[i]))); ctx.stroke();
+  ctx.strokeStyle = "#e5e7eb"; ctx.lineWidth = 1.5; ctx.beginPath(); ps.t.forEach((s, i) => i ? ctx.lineTo(x(s), yd(ps.d2[i])) : ctx.moveTo(x(s), yd(ps.d2[i]))); ctx.stroke();
+  const at = s => ps.t.reduce((bi, v, i) => Math.abs(v - s) < Math.abs(ps.t[bi] - s) ? i : bi, 0);
+  ctx.font = "600 11px Segoe UI, sans-serif"; ctx.textAlign = "center";
+  for (const [k, s] of Object.entries(ps.sdppg || {})) {
+    const i = at(s), v = ps.d2[i], py = yd(v);
+    ctx.fillStyle = css("--resp"); ctx.beginPath(); ctx.arc(x(s), py, 3, 0, 7); ctx.fill();
+    ctx.textBaseline = v >= 0 ? "bottom" : "top"; ctx.fillText(k, x(s), v >= 0 ? py - 4 : py + 4);
+  }
+  ctx.fillStyle = css("--hr");
+  for (const [lbl, s] of [["foot", ps.foot_t], ["peak", ps.peak_t], ["notch", ps.notch_t]]) {
+    if (s == null) continue; const i = at(s); ctx.beginPath(); ctx.arc(x(s), yw(ps.wave[i]), 3.5, 0, 7); ctx.fill();
+  }
+  $("rise").textContent = ps.rise_ms == null ? "–" : ps.rise_ms + " ms";
+  $("ba").textContent = ps.ratios ? fmt(ps.ratios["b/a"], 2) : "–";
+  $("notch").textContent = ps.peak_to_notch_ms == null ? "–" : ps.peak_to_notch_ms + " ms";
+}
+
+// ---------- trend strips (one axis each) ----------
+const STRIPS = [
+  { idx: 1, name: "SpO₂", unit: "%", color: "--spo2", fixed: [85, 100], ref: 90, dec: 0 },
+  { idx: 2, key: "pulse", unit: "bpm", color: "--hr", fixed: null, dec: 0 },
+  { idx: 3, key: "respShort", unit: "/min", color: "--resp", fixed: [4, 30], dec: 1 },
+  { idx: 4, name: "RMSSD", unit: "ms", color: "--hrv", fixed: null, dec: 0 },
+];
+const sname = s => s.name || t(s.key);
+let hoverT = null, hoverXY = null;
+for (const s of STRIPS) {
+  const div = document.createElement("div"); div.className = "strip";
+  div.innerHTML = `<canvas></canvas><span class="lbl"></span>`;
+  $("strips").appendChild(div); s.cv = div.querySelector("canvas"); s.lbl = div.querySelector(".lbl");
+  s.cv.addEventListener("mousemove", e => { if (!s.g) return; const r = s.cv.getBoundingClientRect();
+    hoverT = s.g.t0 + (e.clientX - r.left - s.g.L) / (s.g.W - s.g.L - s.g.R) * s.g.span; hoverXY = [e.clientX, e.clientY]; drawStrips(); });
+  s.cv.addEventListener("mouseleave", () => { hoverT = null; hideTip(); drawStrips(); });
+}
+function visible() {
+  if (!trend.length) return [];
+  const end = trend[trend.length - 1][0];
+  return range ? trend.filter(p => p[0] > end - range) : trend;
+}
+function drawStrips() {
+  const data = visible();
+  let hp = null;
+  if (hoverT != null && data.length) { hp = data[0]; for (const p of data) if (Math.abs(p[0] - hoverT) < Math.abs(hp[0] - hoverT)) hp = p; }
+  STRIPS.forEach((s, k) => drawStrip(s, data, hp, k === STRIPS.length - 1));
+  if (hp) showTip(hoverXY[0], hoverXY[1], `<div style="color:var(--ink-2)">${fmtT(hp[0])}</div>` +
+    STRIPS.map(s => `<div class="row"><span><i style="background:var(${s.color})"></i>${sname(s)}</span><b>${fmt(hp[s.idx], s.dec)} ${hp[s.idx] != null ? s.unit : ""}</b></div>`).join(""));
+  renderTable(data);
+}
+function drawStrip(s, data, hp, showTime) {
+  s.lbl.innerHTML = `<span style="color:var(${s.color})">${sname(s)}</span> <span style="color:var(--muted)">${s.unit}</span>`;
+  const [ctx, W, H] = prep(s.cv);
+  const L = 44, R = 8, T = 10, B = showTime ? 18 : 8;
+  const vals = data.map(p => p[s.idx]).filter(v => v != null);
+  let lo, hi;
+  if (s.fixed) { lo = Math.min(s.fixed[0], ...vals.map(v => Math.floor(v / 5) * 5)); hi = Math.max(s.fixed[1], ...vals.map(v => Math.ceil(v / 5) * 5)); }
+  else if (vals.length) { lo = Math.floor((Math.min(...vals) - 5) / 10) * 10; hi = Math.ceil((Math.max(...vals) + 5) / 10) * 10; }
+  else { lo = 0; hi = 100; }
+  if (hi === lo) hi = lo + 10;
+  const tEnd = data.length ? data[data.length - 1][0] : Date.now() / 1000;
+  const span = range || Math.max(60, tEnd - (data.length ? data[0][0] : tEnd)), t0 = tEnd - span;
+  const x = ts => L + (ts - t0) / span * (W - L - R), y = v => T + (hi - v) / (hi - lo) * (H - T - B);
+  s.g = { L, R, W, t0, span };
+  ctx.font = "10px Segoe UI, sans-serif";
+  const mid = Math.round((lo + hi) / 2 / 5) * 5;
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (const v of [lo, mid, hi]) {
+    ctx.strokeStyle = css("--grid-minor"); ctx.beginPath(); ctx.moveTo(L, Math.round(y(v)) + .5); ctx.lineTo(W - R, Math.round(y(v)) + .5); ctx.stroke();
+    ctx.fillStyle = css("--muted"); ctx.fillText(Math.round(v), L - 6, y(v));
+  }
+  if (s.ref) {
+    ctx.setLineDash([3, 4]); ctx.strokeStyle = css("--crit"); ctx.globalAlpha = .7;
+    ctx.beginPath(); ctx.moveTo(L, Math.round(y(s.ref)) + .5); ctx.lineTo(W - R, Math.round(y(s.ref)) + .5); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+  if (showTime) {
+    ctx.textBaseline = "top";
+    for (let k = 0; k <= 4; k++) { const ts = t0 + span * k / 4; ctx.textAlign = k === 0 ? "left" : k === 4 ? "right" : "center";
+      ctx.fillText(fmtT(ts).slice(0, span <= 600 ? 8 : 5), x(ts), H - B + 3); }
+  }
+  ctx.strokeStyle = css(s.color); ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.beginPath();
+  let pen = false, prev = null;
+  for (const p of data) {
+    const v = p[s.idx];
+    if (v == null || (prev != null && p[0] - prev > 3)) pen = false;
+    if (v != null) { if (!pen) { ctx.moveTo(x(p[0]), y(v)); pen = true; } else ctx.lineTo(x(p[0]), y(v)); }
+    prev = p[0];
+  }
+  ctx.stroke();
+  if (hp) {
+    const hx = Math.round(x(hp[0])) + .5;
+    ctx.strokeStyle = "#5f686d"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(hx, T); ctx.lineTo(hx, H - B); ctx.stroke();
+    const v = hp[s.idx];
+    if (v != null) { ctx.fillStyle = css(s.color); ctx.beginPath(); ctx.arc(hx, y(v), 4, 0, 7); ctx.fill(); ctx.strokeStyle = "#000"; ctx.lineWidth = 2; ctx.stroke(); }
+  }
+}
+function showTip(cx, cy, html) {
+  const el = $("tip"); el.innerHTML = html; el.style.display = "block";
+  const w = el.offsetWidth, h = el.offsetHeight;
+  el.style.left = (cx + 14 + w > innerWidth ? cx - 14 - w : cx + 14) + "px";
+  el.style.top = Math.min(innerHeight - h - 4, cy + 12) + "px";
+}
+function hideTip() { $("tip").style.display = "none"; }
+document.querySelectorAll("[data-range]").forEach(b => b.onclick = () => {
+  document.querySelectorAll("[data-range]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  range = +b.dataset.range; drawStrips();
+});
+$("tableBtn").onclick = () => {
+  const on = $("tableBtn").getAttribute("aria-pressed") !== "true";
+  $("tableBtn").setAttribute("aria-pressed", on); $("tableWrap").style.display = on ? "block" : "none"; drawStrips();
+};
+function renderTable(data) {
+  if ($("tableWrap").style.display !== "block") return;
+  $("tbody").innerHTML = data.slice(-300).reverse().map(p =>
+    `<tr><td>${fmtT(p[0])}</td><td>${fmt(p[1])}</td><td>${fmt(p[2])}</td><td>${fmt(p[3], 1)}</td><td>${fmt(p[4])}</td><td>${fmt(p[5])}</td></tr>`).join("");
+}
+
+// ---------- numerics & alarms ----------
+function setAlarm(el, level, text) { el.className = "alarm" + (level ? " " + level : ""); el.textContent = text || ""; }
+function updateNumerics() {
+  const s = status, a = metrics;
+  $("simChip").hidden = !s.simulated;
+  $("connDot").style.background = s.connected ? css("--hr") : css("--crit");
+  $("connText").textContent = s.connected ? `${t("connected")} · ${s.port}${s.model ? " · " + s.model : ""}` : t("disconnected");
+  $("userChip").textContent = `${t("user")} ${s.user || "–"}`;
+  const lvl = s.finger ? Math.min(8, s.signal || 0) : 0;
+  [...$("sig").children].forEach((b, i) => b.classList.toggle("on", i < lvl));
+  let inop = "";
+  if (serverDown) inop = t("inopServer");
+  else if (!s.connected) inop = t("inopDisconnected");
+  else if (!s.finger) inop = t("inopFinger");
+  else if ((s.signal || 0) < 2) inop = t("inopWeak");
+  $("inop").textContent = inop; $("inop").classList.toggle("show", !!inop);
+
+  $("hr").textContent = s.pr ?? "–";
+  $("spo2").textContent = s.spo2 ?? "–";
+  if (s.spo2 == null) { setAlarm($("spo2Alarm")); $("spo2Sub").textContent = s.finger ? t("starting") : ""; }
+  else if (s.spo2 < 90) { setAlarm($("spo2Alarm"), "crit", t("spo2Low")); $("spo2Sub").textContent = ""; }
+  else if (s.spo2 < 95) { setAlarm($("spo2Alarm"), "warn", t("spo2Reduced")); $("spo2Sub").textContent = ""; }
+  else { setAlarm($("spo2Alarm")); $("spo2Sub").textContent = t("normal"); }
+  $("pSpo2").classList.toggle("crit-bg", s.spo2 != null && s.spo2 < 90);
+  if (s.pr == null) { setAlarm($("hrAlarm")); $("hrSub").textContent = ""; }
+  else if (s.pr > 120 || s.pr < 50) { setAlarm($("hrAlarm"), "warn", s.pr > 120 ? t("hrHigh") : t("hrLow")); $("hrSub").textContent = ""; }
+  else { setAlarm($("hrAlarm")); $("hrSub").textContent = t("deviceAvg"); }
+
+  $("resp").textContent = fmt(a.resp, 0);
+  $("respSub").textContent = a.resp != null
+    ? `${t("respEst")} · ${t("quality")} ${a.resp_q >= .6 ? t("good") : a.resp_q >= .4 ? t("medium") : t("uncertain")}`
+    : (s.finger ? t("collecting") : t("respEst"));
+  $("rmssd").textContent = fmt(a.rmssd);
+  $("sdnn").textContent = fmt(a.sdnn); $("pnn50").textContent = a.pnn50 == null ? "–" : fmt(a.pnn50) + " %";
+  $("hrMean").textContent = fmt(a.hr);
+  $("hrvSub").textContent = a.n_beats ? `${t("last60")} · ${a.n_beats} ${t("beats")}` : t("last60");
+  $("amp").textContent = a.amp_rel == null ? "–" : fmt(a.amp_rel) + " %";
+  $("pi").textContent = s.pi != null ? fmt(s.pi / 100, 1) + " %" : t("na");
+  if (a.irreg == null) $("rhythm").textContent = "–";
+  else if (a.irreg < 5) $("rhythm").textContent = t("regular");
+  else $("rhythm").innerHTML = `<span style="color:var(--warn)">! ${fmt(a.irreg)} % ${t("irregular")}</span>`;
+}
+
+// ---------- device dialog ----------
+function dlgMsg(kind, text) { const m = $("dlgMsg"); m.className = "msg show " + kind; m.textContent = text; }
+async function post(url) { const r = await fetch(url, { method: "POST" }); return r.json(); }
+$("deviceBtn").onclick = () => $("dlg").showModal();
+$("dlgClose").onclick = () => $("dlg").close();
+$("loadStorage").onclick = async () => {
+  dlgMsg("info", t("loading")); $("recWrap").hidden = true;
+  const r = await post("/api/device/storage").catch(e => ({ ok: false, error: String(e) }));
+  const tb = $("segTable").querySelector("tbody"); tb.innerHTML = "";
+  if (!r.ok) { $("segTable").hidden = true; return dlgMsg("err", r.error); }
+  if (!r.segments.length) { $("segTable").hidden = true; return dlgMsg("info", t("noSegments")); }
+  $("dlgMsg").className = "msg";
+  if (r.storing) dlgMsg("info", t("storing"));
+  for (const sg of r.segments) {
+    const tr = document.createElement("tr");
+    const dur = sg.samples ? `${Math.floor(sg.samples / 60)} min ${sg.samples % 60} s` : "–";
+    tr.innerHTML = `<td>${sg.user + 1} / ${sg.segment + 1}</td><td>${sg.start ? new Date(sg.start).toLocaleString(loc()) : t("unknownStart")}</td><td>${dur}</td><td><button>${t("download")}</button></td>`;
+    tr.querySelector("button").onclick = () => downloadSeg(sg);
+    tb.appendChild(tr);
+  }
+  $("segTable").hidden = false;
+};
+async function downloadSeg(sg) {
+  dlgMsg("info", t("loading"));
+  const r = await post(`/api/device/download?user=${sg.user}&segment=${sg.segment}`).catch(e => ({ ok: false, error: String(e) }));
+  if (!r.ok) return dlgMsg("err", r.error === "storing" ? t("storing") : (r.message || r.error));
+  $("dlgMsg").className = "msg";
+  showRecording(r.samples, sg.start);
+  $("recCsv").href = "/api/csv?file=" + encodeURIComponent(r.file);
+}
+function showRecording(samples, start) {
+  $("recWrap").hidden = false;
+  const [ctx, W, H] = prep($("recChart"));
+  const L = 40, R = 40, T = 8, B = 18, n = samples.length;
+  const x = i => L + i / Math.max(1, n - 1) * (W - L - R);
+  const sp = samples.map(s => s[0]).filter(v => v != null), pr = samples.map(s => s[1]).filter(v => v != null);
+  const loS = Math.min(85, ...sp), ys = v => T + (100 - v) / (100 - loS) * (H - T - B);
+  const loP = Math.floor(Math.min(...pr) / 10) * 10 - 10, hiP = Math.ceil(Math.max(...pr) / 10) * 10 + 10;
+  const yp = v => T + (hiP - v) / (hiP - loP) * (H - T - B);
+  ctx.textBaseline = "middle"; ctx.fillStyle = css("--spo2"); ctx.textAlign = "right";
+  ctx.fillText("100", L - 6, ys(100)); ctx.fillText(loS, L - 6, ys(loS));
+  ctx.fillStyle = css("--hr"); ctx.textAlign = "left"; ctx.fillText(hiP, W - R + 6, yp(hiP)); ctx.fillText(loP, W - R + 6, yp(loP));
+  for (const [idx, col, yy] of [[0, "--spo2", ys], [1, "--hr", yp]]) {
+    ctx.strokeStyle = css(col); ctx.lineWidth = 1.5; ctx.beginPath(); let pen = false;
+    samples.forEach((s, i) => { const v = s[idx]; if (v == null) { pen = false; return; } if (!pen) { ctx.moveTo(x(i), yy(v)); pen = true; } else ctx.lineTo(x(i), yy(v)); });
+    ctx.stroke();
+  }
+  ctx.fillStyle = css("--muted"); ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (let k = 0; k <= 4; k++) ctx.fillText(Math.round(n * k / 4 / 60) + " min", x(n * k / 4), H - B + 4);
+  // desaturation events: drop of >= 3 % below the running 120 s baseline, counted once per event
+  let events = 0, inEvent = false;
+  for (let i = 0; i < n; i++) {
+    const v = samples[i][0]; if (v == null) continue;
+    const base = Math.max(...samples.slice(Math.max(0, i - 120), i + 1).map(s => s[0] ?? 0));
+    if (!inEvent && base - v >= 3) { events++; inEvent = true; } else if (inEvent && base - v < 1) inEvent = false;
+  }
+  const hours = n / 3600;
+  $("recStats").innerHTML = `<div>${t("minSpo2")}<b>${sp.length ? Math.min(...sp) : "–"} %</b></div>
+    <div>${t("meanPulse")}<b>${pr.length ? fmt(pr.reduce((a, b) => a + b, 0) / pr.length) : "–"} bpm</b></div>
+    <div>${t("desat")}<b>${events} (${fmt(hours ? events / hours : 0, 1)} ${t("odi")})</b></div>`;
+}
+$("setClock").onclick = async () => {
+  dlgMsg("info", t("loading"));
+  const r = await post("/api/device/clock").catch(e => ({ ok: false, error: String(e) }));
+  if (r.ok) dlgMsg("ok", `${t("clockOk")} ${new Date(r.set_to).toLocaleString(loc())}`);
+  else dlgMsg("err", r.error || `${t("clockFail")} (${(r.acks || []).join(", ")})`);
+};
+
+// ---------- data stream ----------
+let beatTimer, serverDown = false;
+function onMsg(m) {
+  serverDown = false;
+  for (const v of m.w) { wave[wavePos] = v; wavePos = (wavePos + 1) % WAVE_LEN; }
+  if (m.beat) {
+    beatMarks.push((wavePos - 1 + WAVE_LEN) % WAVE_LEN);
+    $("heart").classList.add("beat"); clearTimeout(beatTimer); beatTimer = setTimeout(() => $("heart").classList.remove("beat"), 140);
+  }
+  status = m.s;
+  if (m.rr && m.rr.length) { rrList.push(...m.rr); const cut = Date.now() / 1000 - 900; rrList = rrList.filter(r => r[0] >= cut); }
+  if (m.a) metrics = m.a;
+  if (m.rw) rw = m.rw;
+  if (m.hl) { hl = m.hl; drawPsd(); drawPoincare(); }
+  if ("ps" in m) { ps = m.ps; drawShape(); }
+  updateNumerics();
+  if (m.t) { trend.push(m.t); drawStrips(); }
+}
+fetch("/api/history").then(r => r.json()).then(h => {
+  trend = h.trend || []; rrList = h.rr || []; metrics = h.a || {}; hl = h.hl || {}; ps = h.ps || null; rw = h.rw || [];
+  drawStrips(); drawPsd(); drawPoincare(); drawShape();
+}).catch(() => {});
+const es = new EventSource("/stream");
+es.onmessage = e => onMsg(JSON.parse(e.data));
+es.onerror = () => { serverDown = true; updateNumerics(); };
+
+applyLang();
+(function loop() { drawPleth(); drawResp(); drawTacho(); requestAnimationFrame(loop); })();
+addEventListener("resize", () => { drawStrips(); drawPsd(); drawPoincare(); drawShape(); });
+</script>
+</body>
+</html>
