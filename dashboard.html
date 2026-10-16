@@ -517,7 +517,12 @@ function drawPsd() {
 function drawShape() {
   const [ctx, W, H] = prep($("shape"));
   const L = 8, R = 8, mid = H * 0.58;
-  if (!ps) { ctx.fillStyle = css("--muted"); ctx.textAlign = "center"; ctx.fillText(t("collecting"), W / 2, H / 2); return; }
+  if (!ps) {
+    ctx.fillStyle = css("--muted"); ctx.textAlign = "center"; ctx.fillText(t("collecting"), W / 2, H / 2);
+    for (const id of ["rise", "ba", "notch"]) $(id).textContent = "–";
+    $("shapeMeta").textContent = "";
+    return;
+  }
   $("shapeMeta").textContent = `n = ${ps.n} · 20 s`;
   const t0 = ps.t[0], t1 = ps.t[ps.t.length - 1], x = s => L + (s - t0) / (t1 - t0) * (W - L - R);
   const yw = v => 6 + (1 - v) * (mid - 12), yd = v => mid + (H - mid) / 2 - v * ((H - mid) / 2 - 4);
